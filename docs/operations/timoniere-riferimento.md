@@ -155,6 +155,12 @@ Il successore legge prima questo file, poi `git log` e `git status` del branch;
 chi sostituisce un agente parte da qui e lo integra con lo snapshot di
 `herdr agent read`.
 
+AGGIORNAMENTO PROMPT — quando `timoniere-skill.md` o `docs/operations/timoniere-riferimento.md` cambiano (merge) e l'utente ha copiato i file nel runtime, il Timoniere attivo si fa sostituire da un NUOVO Timoniere con le nuove regole:
+1. aggiorna `docs/handoff/timoniere.md`: stato, agenti in corso (nome, tab, branch), regole date dall'utente, prossimi passi;
+2. lancia il successore in una nuova tab dello stesso workspace (`herdr tab create --workspace "$workspace_id"`, poi `herdr agent start` con `claude` e `--model` scelto secondo le regole) e invia `/timoniere` con args: rilancia `j-cli-p tim --sostituisci` e leggi subito `docs/handoff/timoniere.md`; la sostituzione è quella di `docs/operations/journal-cli-shortcuts.md` (vecchio rinominato `ex-t-timoniere-…`);
+3. verifica con `herdr agent read <nome> --lines 50` che il nuovo sia partito con la Prompt version attesa;
+4. poi fermati: non chiudere i subagenti in corso, passano al nuovo Timoniere.
+
 ## recupero — Monitoraggio e recupero subagenti
 
 MONITORARE — dopo OGNI consegna avvia un'attesa in background, ad esempio `until ! herdr agent list | grep -q '"<nome>".*working'; do sleep 30; done`, perché le notify verso un Timoniere occupato restano in coda (recipient_not_ready). Dopo ogni lancio resti il supervisore degli agenti attivi: quando ti chiedo lo stato, leggi l'output con herdr agent read <nome> --lines 50 e riepilogami per ciascuno: cosa sta facendo, se e' bloccato, se ha finito e con che risultato. Se un agente e' bloccato o ha fallito, proponimi tu la correzione (nuovo prompt all'agente o rilancio con altro modello). PROTOCOLLO OPERATIVO RECUPERO SUBAGENTI (FALSE PARTENZE, QUOTA, STALLI): se dopo un prompt l'agente non entra in working (resta fermo/idle al prompt senza passare a working o prompt stalled/timeout oltre 2-3 minuti) o se va in errore/quota, il Timoniere prepara e conserva prima l'handoff (PASSAGGIO DI CONSEGNE), poi chiude la pane (`herdr pane close <paneId>`), ripulisce la tab e rilancia un agente sostitutivo con modello alternativo senza lasciare processi appesi. FALLBACK QUOTA: se un lancio opencode fallisce con 429/GoUsageLimitError/quota esaurita (errore rilevato dall'output del terminale o dall'errore di lancio, compresa la chiusura di connessione a metà risposta), il Timoniere conserva prima l'handoff, poi chiude la pane, ripulisce la tab e il selettore Timoniere propone rilancio guidato con UN click su -m opencode/muse-spark-1.3-contributor-free (kind opencode); nessun fallback automatico silenzioso: la scelta è esplicita e va registrata nel diario con tier+modello. In caso di fallimenti, crash o processi terminati senza avanzamento: handoff conservato, chiusura della pane, riapertura del compito a 'da fare' nel diario e rilancio dell'agente con modello alternativo. Quando un compito e' finito, aggiorna lo stato del compito corrispondente nel diario del progetto; la revisione cross-modello è non bloccante: la lancia il Timoniere per compiti lunghi o rischiosi, o l'utente se la chiede (vedi REVISIONE CROSS-MODELLO — NON BLOCCANTE).
@@ -262,6 +268,13 @@ SPEZZAMENTO).
   la parsimonia non la elimina e non la moltiplica.
 
 
+## costi — Costo dei token e gestione della spesa
+
+COSTI TOKEN — `node /home/nugh75/ai4educ-console/scripts/journal-cli.mjs usage [--session <id>] [--json]` stampa, in sola lettura: token e costo stimato in USD di Claude Code per modello nelle finestre 5h e 7d (dai transcript locali `~/.claude/projects/*/*.jsonl`), il costo opencode (`opencode stats --cost`, i modelli `*-free` costano zero; comando assente = `unknown`) e la quota Codex (stessa telemetria di `/api/services/quota-status`). Un modello senza prezzo in tabella è `unknown`, mai zero. Livello complessivo: healthy | warning | critical; soglie in USD in `scripts/token-costs.mjs` (override env `TIMONIERE_COST_5H_WARNING|CRITICAL`, `TIMONIERE_COST_7D_WARNING|CRITICAL`), prezzi in un'unica tabella con data di riferimento (`PRICES_AS_OF`).
+- PRIMA di ogni lancio: consulta `usage`. healthy: procedi. warning: preferisci modelli free/economici (T0/T1) e UN agente alla volta. critical: chiedi consenso all'utente (criterio 8 dei CRITERI DI CONSENSO) prima di lanciare qualsiasi modello a pagamento; i free restano autonomi. Il livello Codex critico segue `guide modelli`/QUOTA CODEX.
+- A OGNI CHIUSURA di compito: `usage --session <id>` (id = `agent_session.value` di `herdr agent list`, nome del file transcript) per stimare il costo del solo compito; registralo nel diario con `update-task <repo> <id> --body "<descrizione del compito>\n\nCosto stimato: ~$X (modello)"` (`--body` sostituisce la descrizione: riscrivila intera con la riga in coda). Costo `unknown`: scrivilo come tale.
+- Le stime sono approssimate (transcript locali, prezzi di listino): servono a decidere, non a fatturare. Aggiorna i prezzi in `scripts/token-costs.mjs` quando cambiano.
+
 ## autopilot — Pilota automatico e recupero PR
 
 PILOTA AUTOMATICO — per il progetto {{repo}}: GET `/api/diario/v2/projects/{{repo}}/github/autopilot` consulta il flag; POST sullo stesso endpoint con `{ "enabled": true|false }` arma/spegne (stesso accesso admin del Diario); l'endpoint non unisce PR, il merge richiede la pagina aperta.
@@ -271,3 +284,15 @@ PR E MERGE AUTONOMI — i subagenti aprono PR NON in bozza e non mergiano. A com
 CRITERI DI CONSENSO — il Timoniere chiede PRIMA all'utente, con domanda multi-choice e raccomandazione, SOLO quando il compito prevede: (1) deploy in produzione o riavvio di servizi in uso; (2) comandi sudo; (3) segreti, .env reali o dati di produzione; (4) migrazioni di dati o schema non reversibili, cancellazioni, force push/rebase/reset distruttivi; (5) scelte di prodotto o di sicurezza con trade-off non deciso nel ticket (es. cosa vietare o permettere a un ruolo); (6) test che falliscono e non sono preesistenti; (7) scope diverso dal ticket; (8) spesa token prevista alta. Tutto il resto (PR, merge, scelta del modello, lancio del prossimo compito sbloccato) è autonomo e riportato a posteriori in una riga.
 
 Recupero di una PR bloccata dal pilota automatico (episodi, contatori, accetta/rifiuta): `docs/operations/pr-recovery-ui.md` e `docs/operations/pr-autopilot-recovery-transport.md`. Sostituzione del Timoniere attivo (`journal-cli prompt tim --sostituisci|--affianca`): `docs/operations/journal-cli-shortcuts.md`.
+
+
+## wayfinder — Mappe wayfinder: ticket, file e Project
+
+Regole complete: `docs/agents/issue-tracker.md`; indice delle mappe: `docs/wayfinder/README.md`.
+
+- Il Timoniere lancia la mappa (skill wayfinder) in un subagente dedicato; le domande HITL (grilling, prototipo) l'utente le risponde nella tab del subagente.
+- Mappa = issue con label `wayfinder:map`; ogni ticket è sub-issue (`gh api -X POST repos/<owner>/<repo>/issues/<mappa>/sub_issues -F sub_issue_id=<id>`) con label `wayfinder:research|prototype|grilling|task` e blocchi nativi (`.../issues/<n>/dependencies/blocked_by -F issue_id=<id>`).
+- File `docs/wayfinder/<slug>.md`: Mermaid in cima (colori per stato), mappa ASCII, tabella ticket, decisioni, nebbia. Stesso Mermaid in cima alla issue mappa. Aggiornati con commit+push sulla PR della mappa a ogni cambiamento; riga nuova in `docs/wayfinder/README.md`.
+- Un GitHub Project per repository, «<nome-repo> · Wayfinder», con campi Status (Todo/In Progress/Done) e Tipo (mappa/ricerca/grilling/prototipo/task). Se manca: `gh project create --owner <owner> --title "<nome-repo> · Wayfinder"`, `gh project link <n> --owner <owner> --repo <owner>/<repo>`, `gh project field-create <n> --owner <owner> --name Tipo --data-type SINGLE_SELECT --single-select-options "mappa,ricerca,grilling,prototipo,task"` (Status esiste già).
+- Ogni issue wayfinder: `gh project item-add <n> --owner <owner> --url <issue>`, poi Status e Tipo con `gh project item-edit` (id: `gh project field-list <n> --owner <owner> --format json`).
+- All'utente dai sempre i link: issue mappa, file `docs/wayfinder/<slug>.md`, Project.
